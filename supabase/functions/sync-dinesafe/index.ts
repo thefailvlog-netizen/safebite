@@ -7,28 +7,63 @@
  * Data source: https://open.toronto.ca/dataset/dinesafe/
  * API: Toronto CKAN datastore
  *
- * Expected to run nightly via Supabase scheduled function.
+ * Notes on DineSafe data quirks:
+ * - "Inspection ID" is often the string "None" or "null" — we synthesize
+ *   a stable key from (EstablishmentID_Date_Type) when this happens.
+ * - Each row represents one infraction; a clean inspection has one row
+ *   with no infraction detail.
+ *
+ * Designed for nightly incremental updates, not full historical seeds.
+ * For the initial full seed, use scripts/seed-dinesafe.ts locally.
  */
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
-const CKAN_BASE = "https://ckan0.cf.opendata.inter.prod-toronto.ca/api/3/action";
+const CKAN_BASE =
+  "https://ckan0.cf.opendata.inter.prod-toronto.ca/api/3/action";
 const PACKAGE_ID = "dinesafe";
 const PAGE_SIZE = 1000;
 
+/** Returns true if a value is null-like (null, undefined, "None", "null", "") */
+function isNullLike(val: unknown): boolean {
+  if (val === null || val === undefined) return true;
+  const s = String(val).trim();
+  return s === "" || s === "None" || s === "null" || s === "undefined";
+}
+
+function nullOrString(val: unknown): string | null {
+  return isNullLike(val) ? null : String(val).trim();
+}
+
+function nullOrFloat(val: unknown): number | null {
+  if (isNullLike(val)) return null;
+  const n = parseFloat(String(val));
+  return isNaN(n) ? null : n;
+}
+
+function nullOrDate(val: unknown): string | null {
+  if (isNullLike(val)) return null;
+  try {
+    const d = new Date(String(val));
+    if (isNaN(d.getTime())) return null;
+    return d.toISOString().split("T")[0];
+  } catch {
+    return null;
+  }
+}
+
 interface DineSafeRow {
   _id: number;
-  "Establishment ID": number;
-  "Establishment Name": string;
-  "Establishment Type": string;
-  "Establishment Address": string;
+  "Establishment ID": number | null;
+  "Establishment Name": string | null;
+  "Establishment Type": string | null;
+  "Establishment Address": string | null;
   Latitude: string | null;
   Longitude: string | null;
-  "Inspection ID": number;
-  "Inspection Date": string;
-  "Inspection Type": string;
-  "Establishment Status": string;
-  "Min. Inspections Per Year": number;
+  "Inspection ID": number | string | null;
+  "Inspection Date": string | null;
+  "Inspection Type": string | null;
+  "Establishment Status": string | null;
   "Infraction Details": string | null;
   Severity: string | null;
   Action: string | null;
@@ -38,6 +73,7 @@ interface DineSafeRow {
 }
 
 interface SyncStats {
+  totalRows: number;
   establishmentsUpserted: number;
   inspectionsUpserted: number;
   infractionsInserted: number;
@@ -45,7 +81,6 @@ interface SyncStats {
 }
 
 Deno.serve(async (req) => {
-  // Allow GET (for testing) and POST (from scheduler)
   if (req.method !== "GET" && req.method !== "POST") {
     return new Response("Method not allowed", { status: 405 });
   }
@@ -56,6 +91,7 @@ Deno.serve(async (req) => {
   );
 
   const stats: SyncStats = {
+    totalRows: 0,
     establishmentsUpserted: 0,
     inspectionsUpserted: 0,
     infractionsInserted: 0,
@@ -63,25 +99,19 @@ Deno.serve(async (req) => {
   };
 
   try {
-    // Step 1: Get the DineSafe resource ID from the CKAN package
-    const packageRes = await fetch(
-      `${CKAN_BASE}/package_show?id=${PACKAGE_ID}`
-    );
-    const packageData = await packageRes.json();
+    // ── Step 1: Discover the active DineSafe resource ─────────────────────
+    const pkgRes = await fetch(`${CKAN_BASE}/package_show?id=${PACKAGE_ID}`);
+    const pkgData = await pkgRes.json();
+    if (!pkgData.success) throw new Error("Failed to fetch DineSafe package");
 
-    if (!packageData.success) {
-      throw new Error("Failed to fetch DineSafe package metadata");
-    }
-
-    // Find the datastore resource (prefer the most recently modified)
-    const resources = packageData.result.resources as Array<{
+    const resources = pkgData.result.resources as Array<{
       id: string;
       name: string;
       datastore_active: boolean;
       last_modified: string;
     }>;
 
-    const datastoreResource = resources
+    const resource = resources
       .filter((r) => r.datastore_active)
       .sort(
         (a, b) =>
@@ -89,207 +119,183 @@ Deno.serve(async (req) => {
           new Date(a.last_modified).getTime()
       )[0];
 
-    if (!datastoreResource) {
-      throw new Error("No active datastore resource found for DineSafe");
-    }
+    if (!resource) throw new Error("No active DineSafe datastore resource");
+    console.log(`Resource: ${resource.id} — ${resource.name}`);
 
-    console.log(`Using resource: ${datastoreResource.id} (${datastoreResource.name})`);
-
-    // Step 2: Paginate through all records
+    // ── Step 2: Paginate and fetch all rows ───────────────────────────────
     let offset = 0;
-    let totalRecords = Infinity;
+    let total = Infinity;
     const allRows: DineSafeRow[] = [];
 
-    while (offset < totalRecords) {
-      const url = `${CKAN_BASE}/datastore_search?id=${datastoreResource.id}&limit=${PAGE_SIZE}&offset=${offset}`;
-      const res = await fetch(url);
+    while (offset < total) {
+      const res = await fetch(
+        `${CKAN_BASE}/datastore_search?id=${resource.id}&limit=${PAGE_SIZE}&offset=${offset}`
+      );
       const data = await res.json();
+      if (!data.success) throw new Error(`Fetch failed at offset ${offset}`);
 
-      if (!data.success) {
-        throw new Error(`Failed to fetch page at offset ${offset}`);
-      }
-
-      totalRecords = data.result.total;
-      const rows: DineSafeRow[] = data.result.records;
-      allRows.push(...rows);
+      total = data.result.total;
+      allRows.push(...data.result.records);
       offset += PAGE_SIZE;
+      console.log(`Fetched ${allRows.length}/${total}`);
 
-      console.log(`Fetched ${allRows.length}/${totalRecords} records`);
-
-      // Safety valve
-      if (allRows.length > 500000) break;
+      if (allRows.length > 500_000) break; // safety valve
     }
 
-    // Step 3: Group rows by establishment and inspection
+    stats.totalRows = allRows.length;
+
+    // ── Step 3: Group by establishment and inspection ─────────────────────
+    // Synthesize a stable inspection key when Inspection ID is null-like.
     const establishmentMap = new Map<string, DineSafeRow>();
     const inspectionMap = new Map<string, DineSafeRow[]>();
 
     for (const row of allRows) {
-      const estId = String(row["Establishment ID"]);
-      const inspId = String(row["Inspection ID"]);
+      const estId = isNullLike(row["Establishment ID"])
+        ? null
+        : String(row["Establishment ID"]);
+      if (!estId) continue;
 
       if (!establishmentMap.has(estId)) {
         establishmentMap.set(estId, row);
       }
 
-      if (!inspectionMap.has(inspId)) {
-        inspectionMap.set(inspId, []);
-      }
+      // Build a stable inspection key
+      const rawInspId = row["Inspection ID"];
+      const inspId = isNullLike(rawInspId)
+        ? `synth_${estId}_${nullOrDate(row["Inspection Date"]) ?? "nodate"}_${nullOrString(row["Inspection Type"]) ?? "notype"}`
+        : String(rawInspId);
+
+      if (!inspectionMap.has(inspId)) inspectionMap.set(inspId, []);
       inspectionMap.get(inspId)!.push(row);
     }
 
-    // Step 4: Upsert establishments
-    const establishmentRows = Array.from(establishmentMap.values()).map((row) => {
-      const lat = row.Latitude ? parseFloat(row.Latitude) : null;
-      const lng = row.Longitude ? parseFloat(row.Longitude) : null;
+    // ── Step 4: Upsert establishments ─────────────────────────────────────
+    const BATCH = 500;
+    const estRows = Array.from(establishmentMap.values()).map((row) => ({
+      external_id: String(row["Establishment ID"]),
+      name: nullOrString(row["Establishment Name"]) ?? "",
+      address: nullOrString(row["Establishment Address"]),
+      city: "Toronto",
+      province: "ON",
+      lat: nullOrFloat(row.Latitude),
+      lng: nullOrFloat(row.Longitude),
+      category: nullOrString(row["Establishment Type"]),
+      status: nullOrString(row["Establishment Status"]),
+      source: "dinesafe",
+    }));
 
-      return {
-        external_id: String(row["Establishment ID"]),
-        name: row["Establishment Name"]?.trim() ?? "",
-        address: row["Establishment Address"]?.trim() ?? null,
-        city: "Toronto",
-        province: "ON",
-        lat,
-        lng,
-        category: row["Establishment Type"]?.trim() ?? null,
-        status: row["Establishment Status"]?.trim() ?? null,
-        source: "dinesafe",
-      };
-    });
-
-    // Batch upsert in chunks of 500
-    const BATCH_SIZE = 500;
-    for (let i = 0; i < establishmentRows.length; i += BATCH_SIZE) {
-      const batch = establishmentRows.slice(i, i + BATCH_SIZE);
+    for (let i = 0; i < estRows.length; i += BATCH) {
       const { error } = await supabase
         .from("establishments")
-        .upsert(batch, { onConflict: "external_id" });
-
-      if (error) {
-        stats.errors.push(`establishments batch ${i}: ${error.message}`);
-      } else {
-        stats.establishmentsUpserted += batch.length;
-      }
+        .upsert(estRows.slice(i, i + BATCH), { onConflict: "external_id" });
+      if (error) stats.errors.push(`est batch ${i}: ${error.message}`);
+      else stats.establishmentsUpserted += Math.min(BATCH, estRows.length - i);
     }
+    console.log(`Establishments: ${stats.establishmentsUpserted}`);
 
-    console.log(`Upserted ${stats.establishmentsUpserted} establishments`);
-
-    // Step 5: Fetch establishment UUIDs (external_id → uuid)
-    const { data: estRecords, error: estFetchError } = await supabase
+    // ── Step 5: Load establishment UUID map ───────────────────────────────
+    const { data: estRecs, error: estErr } = await supabase
       .from("establishments")
       .select("id, external_id");
-
-    if (estFetchError) throw new Error(`Failed to fetch establishment IDs: ${estFetchError.message}`);
-
-    const estIdMap = new Map<string, string>(
-      estRecords!.map((r: { id: string; external_id: string }) => [r.external_id, r.id])
+    if (estErr) throw new Error(`est UUID fetch: ${estErr.message}`);
+    const estIdMap = new Map(
+      (estRecs ?? []).map((r: { id: string; external_id: string }) => [
+        r.external_id,
+        r.id,
+      ])
     );
 
-    // Step 6: Upsert inspections and insert infractions
-    const inspectionInserts = [];
-    const infractionInserts = [];
+    // ── Step 6: Upsert inspections ────────────────────────────────────────
+    const inspRows = [];
+    const infractionQueue: Array<{
+      inspKey: string;
+      row: DineSafeRow;
+    }> = [];
 
-    for (const [inspExternalId, rows] of inspectionMap.entries()) {
-      const firstRow = rows[0];
-      const estExternalId = String(firstRow["Establishment ID"]);
-      const establishmentUuid = estIdMap.get(estExternalId);
+    for (const [inspKey, rows] of inspectionMap.entries()) {
+      const first = rows[0];
+      const estId = String(first["Establishment ID"]);
+      const estUuid = estIdMap.get(estId);
+      if (!estUuid) continue;
 
-      if (!establishmentUuid) continue;
+      const date = nullOrDate(first["Inspection Date"]);
+      if (!date) continue;
 
-      const parsedDate = firstRow["Inspection Date"]
-        ? new Date(firstRow["Inspection Date"]).toISOString().split("T")[0]
-        : null;
-
-      if (!parsedDate) continue;
-
-      inspectionInserts.push({
-        establishment_id: establishmentUuid,
-        external_id: inspExternalId,
-        inspection_date: parsedDate,
-        inspection_type: firstRow["Inspection Type"]?.trim() ?? null,
-        outcome: firstRow["Outcome Type"]?.trim() ?? null,
+      inspRows.push({
+        establishment_id: estUuid,
+        external_id: inspKey,
+        inspection_date: date,
+        inspection_type: nullOrString(first["Inspection Type"]),
+        outcome: nullOrString(first["Outcome Type"]),
         source: "dinesafe",
       });
 
-      // Collect infractions for this inspection (rows with actual violation data)
       for (const row of rows) {
-        if (row["Infraction Details"]) {
-          const courtDate = row["Court Date"]
-            ? new Date(row["Court Date"]).toISOString().split("T")[0]
-            : null;
-
-          infractionInserts.push({
-            _inspection_external_id: inspExternalId,
-            external_id: String(row._id),
-            infraction_text: row["Infraction Details"]?.trim() ?? null,
-            severity: row.Severity?.trim() ?? null,
-            action: row.Action?.trim() ?? null,
-            amount: row["Amount Fined"] ? parseFloat(row["Amount Fined"]) : null,
-            court_date: courtDate,
-            source: "dinesafe",
-          });
+        if (!isNullLike(row["Infraction Details"])) {
+          infractionQueue.push({ inspKey, row });
         }
       }
     }
 
-    // Upsert inspections in batches
-    for (let i = 0; i < inspectionInserts.length; i += BATCH_SIZE) {
-      const batch = inspectionInserts.slice(i, i + BATCH_SIZE);
+    for (let i = 0; i < inspRows.length; i += BATCH) {
       const { error } = await supabase
         .from("inspections")
-        .upsert(batch, { onConflict: "establishment_id,external_id" });
-
-      if (error) {
-        stats.errors.push(`inspections batch ${i}: ${error.message}`);
-      } else {
-        stats.inspectionsUpserted += batch.length;
-      }
+        .upsert(inspRows.slice(i, i + BATCH), {
+          onConflict: "establishment_id,external_id",
+        });
+      if (error) stats.errors.push(`insp batch ${i}: ${error.message}`);
+      else stats.inspectionsUpserted += Math.min(BATCH, inspRows.length - i);
     }
+    console.log(`Inspections: ${stats.inspectionsUpserted}`);
 
-    console.log(`Upserted ${stats.inspectionsUpserted} inspections`);
-
-    // Fetch inspection UUIDs (external_id → uuid)
-    const { data: inspRecords, error: inspFetchError } = await supabase
+    // ── Step 7: Load inspection UUID map ──────────────────────────────────
+    const { data: inspRecs, error: inspErr } = await supabase
       .from("inspections")
       .select("id, external_id");
-
-    if (inspFetchError) throw new Error(`Failed to fetch inspection IDs: ${inspFetchError.message}`);
-
-    const inspIdMap = new Map<string, string>(
-      inspRecords!.map((r: { id: string; external_id: string }) => [r.external_id, r.id])
+    if (inspErr) throw new Error(`insp UUID fetch: ${inspErr.message}`);
+    const inspIdMap = new Map(
+      (inspRecs ?? []).map((r: { id: string; external_id: string }) => [
+        r.external_id,
+        r.id,
+      ])
     );
 
-    // Insert infractions (skip if already exist via external_id)
-    const infractionRows = infractionInserts
-      .map(({ _inspection_external_id, ...inf }) => {
-        const inspectionUuid = inspIdMap.get(_inspection_external_id);
-        if (!inspectionUuid) return null;
-        return { ...inf, inspection_id: inspectionUuid };
+    // ── Step 8: Upsert infractions ────────────────────────────────────────
+    const infrRows = infractionQueue
+      .map(({ inspKey, row }) => {
+        const inspUuid = inspIdMap.get(inspKey);
+        if (!inspUuid) return null;
+        return {
+          inspection_id: inspUuid,
+          external_id: String(row._id),
+          infraction_text: nullOrString(row["Infraction Details"]),
+          severity: nullOrString(row.Severity),
+          action: nullOrString(row.Action),
+          amount: nullOrFloat(row["Amount Fined"]),
+          court_date: nullOrDate(row["Court Date"]),
+          source: "dinesafe",
+        };
       })
       .filter(Boolean);
 
-    for (let i = 0; i < infractionRows.length; i += BATCH_SIZE) {
-      const batch = infractionRows.slice(i, i + BATCH_SIZE);
+    for (let i = 0; i < infrRows.length; i += BATCH) {
       const { error } = await supabase
         .from("infractions")
-        .upsert(batch, { onConflict: "inspection_id,external_id", ignoreDuplicates: true });
-
-      if (error) {
-        stats.errors.push(`infractions batch ${i}: ${error.message}`);
-      } else {
-        stats.infractionsInserted += batch.length;
-      }
+        .upsert(infrRows.slice(i, i + BATCH), {
+          onConflict: "inspection_id,external_id",
+          ignoreDuplicates: true,
+        });
+      if (error) stats.errors.push(`infr batch ${i}: ${error.message}`);
+      else stats.infractionsInserted += Math.min(BATCH, infrRows.length - i);
     }
+    console.log(`Infractions: ${stats.infractionsInserted}`);
 
-    console.log(`Inserted ${stats.infractionsInserted} infractions`);
-
-    // Step 7: Update PostGIS location column from lat/lng
+    // ── Step 9: Update PostGIS locations ─────────────────────────────────
     await supabase.rpc("update_establishment_locations");
-
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    stats.errors.push(`Fatal: ${message}`);
-    console.error("Sync failed:", message);
+    const msg = err instanceof Error ? err.message : String(err);
+    stats.errors.push(`Fatal: ${msg}`);
+    console.error("Sync error:", msg);
   }
 
   return new Response(JSON.stringify(stats, null, 2), {
