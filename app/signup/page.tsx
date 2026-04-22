@@ -27,34 +27,19 @@ export default function SignupPage() {
     setLoading(true)
     const supabase = createClient()
 
-    const { data, error: signUpError } = await supabase.auth.signUp({
+    // Pass full_name in metadata — DB trigger auto-creates the operators row
+    const { error: signUpError } = await supabase.auth.signUp({
       email,
       password,
+      options: {
+        data: { full_name: fullName },
+        // Skip email redirect — we manage access via admin approval
+        emailRedirectTo: undefined,
+      },
     })
 
     if (signUpError) {
       setError(signUpError.message)
-      setLoading(false)
-      return
-    }
-
-    const userId = data.user?.id
-    if (!userId) {
-      setError('Signup failed. Please try again.')
-      setLoading(false)
-      return
-    }
-
-    const { error: insertError } = await supabase.from('operators').insert({
-      id: userId,
-      email,
-      full_name: fullName,
-      is_approved: false,
-      is_admin: false,
-    })
-
-    if (insertError) {
-      setError(insertError.message)
       setLoading(false)
       return
     }
