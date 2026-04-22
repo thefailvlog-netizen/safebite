@@ -129,6 +129,33 @@
 
 ---
 
+## Security Audit — 2026-04-22
+
+Full audit conducted. 7 issues fixed, 3 noted as low-priority considerations.
+
+### Fixed
+| # | Issue | File | Fix |
+|---|---|---|---|
+| 1 | Edge function publicly triggerable | `supabase/functions/sync-dinesafe/index.ts` | Added `Authorization: Bearer <SYNC_SECRET>` check |
+| 2 | Admin page relied solely on middleware for access control | `app/admin/page.tsx` | Added explicit server-side `is_admin` check with redirect |
+| 3 | Open redirect in auth callback | `app/auth/callback/route.ts` | Validate `next` param starts with `/` and not `//` |
+| 4 | `remove` action left zombie Supabase Auth user | `app/api/admin/users/route.ts` | Now calls `admin.auth.admin.deleteUser()` after operators delete |
+| 5 | `userId` passed to DB without format validation | `app/api/admin/users/route.ts` | UUID regex validation before any DB operation |
+| 6 | N+1 query in restaurant detail API | `app/api/restaurant/[id]/route.ts` | Replaced per-inspection loop with single nested select |
+| 7 | No HTTP security headers | `next.config.mjs` | Added CSP, X-Frame-Options, X-Content-Type-Options, Referrer-Policy, Permissions-Policy |
+
+### Bonus fixes (found during audit)
+- `requireAdmin()` in admin API now uses service role client for reliable `is_admin` lookup (was using anon client — same RLS risk as middleware)
+- `select('*')` replaced with explicit column lists in admin page and API
+- Dashboard `user!.id` unsafe assertion replaced with null-checked `redirect('/login')`
+
+### Low-priority (noted, not yet actioned)
+- **Forgot password**: login page has a dead "Forgot password?" label — no recovery path yet. Needs Supabase password reset flow wired up.
+- **Rate limiting on /api/search**: no throttle on public search endpoint. Fine for MVP; revisit before public launch.
+- **Service role key rotation**: key is a 66-year JWT. Consider rotating it annually or after any access changes.
+
+---
+
 ## Current State (as of 2026-04-22)
 
 | Area | Status |
