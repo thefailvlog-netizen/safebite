@@ -1,5 +1,6 @@
 import Link from 'next/link'
 import { redirect } from 'next/navigation'
+import { createClient as createSupabaseAdmin } from '@supabase/supabase-js'
 import { createClient } from '@/lib/supabase/server'
 import { SignOutButton } from './sign-out-button'
 
@@ -8,7 +9,12 @@ export default async function PendingPage() {
   const { data: { user } } = await supabase.auth.getUser()
 
   if (user) {
-    const { data: operator } = await supabase
+    // Use service role to bypass RLS for reliable approval check
+    const admin = createSupabaseAdmin(
+      process.env.NEXT_PUBLIC_SUPABASE_URL!,
+      process.env.SUPABASE_SERVICE_ROLE_KEY!
+    )
+    const { data: operator } = await admin
       .from('operators')
       .select('is_approved')
       .eq('id', user.id)
