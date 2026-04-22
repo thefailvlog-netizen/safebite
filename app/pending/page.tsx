@@ -1,10 +1,23 @@
 import Link from 'next/link'
+import { redirect } from 'next/navigation'
 import { createClient } from '@/lib/supabase/server'
 import { SignOutButton } from './sign-out-button'
 
 export default async function PendingPage() {
   const supabase = await createClient()
   const { data: { user } } = await supabase.auth.getUser()
+
+  if (user) {
+    const { data: operator } = await supabase
+      .from('operators')
+      .select('is_approved')
+      .eq('id', user.id)
+      .single()
+
+    if (operator?.is_approved) {
+      redirect('/dashboard')
+    }
+  }
 
   return (
     <div className="min-h-screen bg-background flex items-center justify-center px-4">
