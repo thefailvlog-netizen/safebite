@@ -75,6 +75,15 @@
 
 ## Issues Encountered & Resolved
 
+### 9. DineSafe seed — three bugs causing empty search results (2026-04-22)
+- **Problem A — Wrong field name:** Seed read `row["Outcome Type"]` which doesn't exist. DineSafe's `Outcome` field is a *court decision*, not Pass/Fail status. All 18,925 inspections stored with `outcome = null`.
+- **Problem B — Supabase 1,000-row select limit:** After upserting establishments, the seed fetched the ID map with a plain `.select()` which Supabase caps at 1,000 rows. Only the first 1,000 establishments matched during inspection linking — 17,725 inspections silently skipped (1,198 → 18,925).
+- **Problem C — No "Establishment Status" field in current API:** The old DineSafe API had an explicit `Establishment Status` (Pass / Conditional Pass / Closed). The current API removed it. Pass/Fail must be **derived** from infraction data: no infractions → Pass; any infraction → Conditional Pass.
+- **Fix:** (1) Derive outcome from `Infraction Details` presence instead of a non-existent field. (2) Paginate the establishment ID fetch in batches of 1,000. (3) Remove `Inspection Type` from synthetic key (field doesn't exist in current API).
+- **Result after re-seed:** 18,925 inspections (0 null outcomes), 12,152 infractions — 6,773 Pass / 12,152 Conditional Pass.
+
+
+
 ### 1. Geist font not in Next.js 14
 - **Problem:** `create-next-app` scaffold used `import { Geist } from "next/font/google"` which doesn't exist in v14
 - **Fix:** Replaced with `Inter` from `next/font/google`
@@ -125,7 +134,7 @@
 | Area | Status |
 |---|---|
 | Infrastructure | ✅ Live |
-| DineSafe data (Toronto) | ✅ Seeded — 18,925 establishments |
+| DineSafe data (Toronto) | ✅ Seeded — 18,925 establishments, 18,925 inspections, 12,152 infractions |
 | Landing page | ✅ Live |
 | Restaurant search | ✅ Live |
 | Restaurant detail | ✅ Live |
