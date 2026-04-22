@@ -1,4 +1,5 @@
 import Link from 'next/link'
+import { redirect } from 'next/navigation'
 import { createClient } from '@/lib/supabase/server'
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
@@ -8,10 +9,12 @@ export default async function DashboardPage() {
   const supabase = await createClient()
   const { data: { user } } = await supabase.auth.getUser()
 
+  if (!user) redirect('/login')
+
   const { data: operator } = await supabase
     .from('operators')
     .select('full_name, email')
-    .eq('id', user!.id)
+    .eq('id', user.id)
     .single()
 
   const name = operator?.full_name ?? operator?.email ?? user?.email ?? 'there'

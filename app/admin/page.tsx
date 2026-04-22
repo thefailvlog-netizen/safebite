@@ -1,4 +1,5 @@
 import Link from 'next/link'
+import { redirect } from 'next/navigation'
 import { createClient as createServiceClient } from '@supabase/supabase-js'
 import { createClient } from '@/lib/supabase/server'
 import type { Operator } from '@/lib/types'
@@ -15,10 +16,21 @@ export default async function AdminPage() {
   const supabase = await createClient()
   const { data: { user } } = await supabase.auth.getUser()
 
+  // Server-side auth check — don't rely solely on middleware
+  if (!user) redirect('/login')
+
   const admin = serviceClient()
+  const { data: currentOperator } = await admin
+    .from('operators')
+    .select('is_admin')
+    .eq('id', user.id)
+    .single()
+
+  if (!currentOperator?.is_admin) redirect('/dashboard')
+
   const { data: operators } = await admin
     .from('operators')
-    .select('*')
+    .select('id, full_name, email, is_approved, is_admin, created_at')
     .order('created_at', { ascending: false })
 
   const allOperators: Operator[] = operators ?? []
@@ -34,7 +46,7 @@ export default async function AdminPage() {
             SafeBite
           </Link>
           <div className="flex items-center gap-3">
-            <span className="text-sm text-muted-foreground hidden sm:inline">{user?.email}</span>
+            <span className="text-sm text-muted-foreground hidden sm:inline">{user.email}</span>
             <Link href="/dashboard" className="text-sm text-muted-foreground hover:text-foreground transition-colors">
               Dashboard
             </Link>

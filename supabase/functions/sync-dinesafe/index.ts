@@ -85,6 +85,17 @@ Deno.serve(async (req) => {
     return new Response("Method not allowed", { status: 405 });
   }
 
+  // Require a shared secret so the function can't be triggered by anyone
+  // who discovers the URL. Set SYNC_SECRET in the Supabase Edge Function secrets.
+  // The pg_cron trigger must pass: Authorization: Bearer <SYNC_SECRET>
+  const syncSecret = Deno.env.get("SYNC_SECRET");
+  if (syncSecret) {
+    const authHeader = req.headers.get("Authorization") ?? "";
+    if (authHeader !== `Bearer ${syncSecret}`) {
+      return new Response("Unauthorized", { status: 401 });
+    }
+  }
+
   const supabase = createClient(
     Deno.env.get("SUPABASE_URL")!,
     Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!

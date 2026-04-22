@@ -2,6 +2,8 @@ import { NextRequest, NextResponse } from 'next/server'
 import { createClient as createServiceClient } from '@supabase/supabase-js'
 import { createClient } from '@/lib/supabase/server'
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
 function serviceClient() {
   return createServiceClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -12,17 +14,17 @@ function serviceClient() {
 async function requireAdmin() {
   const supabase = await createClient()
   const { data: { user } } = await supabase.auth.getUser()
-
   if (!user) return null
 
-  const { data: operator } = await supabase
+  // Use service role to bypass RLS — same pattern as middleware
+  const admin = serviceClient()
+  const { data: operator } = await admin
     .from('operators')
     .select('is_admin')
     .eq('id', user.id)
     .single()
 
   if (!operator?.is_admin) return null
-
   return user
 }
 
@@ -35,7 +37,7 @@ export async function GET() {
   const admin = serviceClient()
   const { data, error } = await admin
     .from('operators')
-    .select('*')
+    .select('id, full_name, email, is_approved, is_admin, created_at')
     .order('created_at', { ascending: false })
 
   if (error) {
@@ -52,10 +54,15 @@ export async function POST(request: NextRequest) {
   }
 
   const body = await request.json()
-  const { action, userId } = body as { action: 'approve' | 'remove'; userId: string }
+  const { action, userId } = body as { action: string; userId: string }
 
   if (!action || !userId) {
     return NextResponse.json({ error: 'Missing action or userId' }, { status: 400 })
+  }
+
+  // Validate UUID format before hitting the database
+  if (!UUID_RE.test(userId)) {
+    return NextResponse.json({ error: 'Invalid userId' }, { status: 400 })
   }
 
   const admin = serviceClient()
@@ -73,14 +80,23 @@ export async function POST(request: NextRequest) {
   }
 
   if (action === 'remove') {
-    const { error } = await admin
+    // Delete the operators row first
+    const { error: opError } = await admin
       .from('operators')
       .delete()
       .eq('id', userId)
 
-    if (error) {
-      return NextResponse.json({ error: error.message }, { status: 500 })
+    if (opError) {
+      return NextResponse.json({ error: opError.message }, { status: 500 })
     }
+
+    // Also delete the Supabase Auth user so they can't log in with a zombie session
+    const { error: authError } = await admin.auth.admin.deleteUser(userId)
+    if (authError) {
+      // Non-fatal — operators row is already gone; log and continue
+      console.error(`Warning: operators row deleted but auth user removal failed: ${authError.message}`)
+    }
+
     return NextResponse.json({ success: true })
   }
 
