@@ -186,6 +186,46 @@ Ingest AHS provincial portal + Calgary Socrata data.
 
 ---
 
+## Security Backlog
+
+Low-priority items flagged during Sprint 1 security audit. Not urgent for MVP but must be addressed before any paid/public launch.
+
+### SEC-001 · Forgot Password Flow
+**Priority:** P1 (before public launch)
+
+The login page has a dead "Forgot password?" label with no implementation. Users who lose access have no self-serve recovery — Mike has to manually reset via Supabase Dashboard. Wire up Supabase's built-in password reset flow (`supabase.auth.resetPasswordForEmail()`).
+
+**Acceptance criteria:**
+- "Forgot password?" link on login page sends a reset email
+- User clicks link in email, lands on a reset page, sets a new password
+- Works end-to-end without admin involvement
+
+---
+
+### SEC-002 · Rate Limiting on Public Search API
+**Priority:** P2 (before public launch)
+
+`/api/search` is unauthenticated and hits the database on every request. No throttle exists. At scale, automated scraping or a traffic spike could exhaust Supabase connection pool limits on the free tier.
+
+**Options:**
+- Add `Cache-Control: public, s-maxage=60` response headers as a first step
+- Vercel Edge rate limiting by IP for harder protection
+- Revisit once real traffic exists — premature optimization otherwise
+
+---
+
+### SEC-003 · Service Role Key Rotation
+**Priority:** P3 (maintenance, not urgent)
+
+The Supabase service role key is a JWT that expires in 2092 (~66 years). It grants full database access with no RLS. Should be rotated periodically or any time access changes (new collaborator, suspected exposure, etc.).
+
+**When to action:**
+- Before bringing on any contractors or external collaborators
+- If the key is ever accidentally committed to git or shared
+- Annually as good hygiene
+
+---
+
 ## Open Questions
 
 | # | Question | Status |
@@ -196,4 +236,4 @@ Ingest AHS provincial portal + Calgary Socrata data.
 
 ---
 
-*Last updated: 2026-04-21*
+*Last updated: 2026-04-22*
